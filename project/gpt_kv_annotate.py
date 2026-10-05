@@ -52,24 +52,23 @@ class MultiHeadAttention(nn.Module):
             persistent=False
         )
 
-        ####################################################
         # NEW (KV cache)
-        # NOTE: What do these three start as? What will cache_k hold after 5 tokens?
+        #   cache_k and cache_v start as None (empty), and ptr_current_pos starts at 0. After 5 tokens, cache_k holds (1, 5, 12, 64).
         self.register_buffer("cache_k", None, persistent=False)
         self.register_buffer("cache_v", None, persistent=False)
         self.ptr_current_pos = 0
-        ####################################################
 
     # forward() passes x through the layers in order. 
     # CHANGED (KV cache): new use_cache argument.
-    # NOTE: During cached generation, what is num_tokens on the first call? On every later call?
+    # During cached generation, num_tokens is 4 on the first call (prefill, the whole prompt), then 1 on every call after that (decode). It doesn't grow; the cache does.
     def forward(self, x, use_cache=False):
         b, num_tokens, d_in = x.shape
 
         # Each token's vector gets run through the key, value, or query neurons to get their key, value, or query. 
         # The shape is (1, 4, 768) for each matrix. 1 is number of batches we're testing, 4 is the number of tokens in the input (from "Hello, I am"), and there are 768 dimensions in each token's embedding.
         # CHANGED (KV cache): keys/values renamed keys_new/values_new.
-        # NOTE: Why "new"? Why does queries keep its name?
+        # keys_new and values_new hold only this call's keys and values. They get added to the cache, and then keys/values means the whole cache.
+        #   queries keeps its name because queries are never cached: only the current token's query is needed.
         keys_new = self.W_key(x)        # Run every token's vector through the key neurons to get each token's key.
         values_new = self.W_value(x)    # Same, but for values. 
         queries = self.W_query(x)   # Same, but for queries. 
@@ -80,11 +79,9 @@ class MultiHeadAttention(nn.Module):
         values_new = values_new.view(b, num_tokens, self.num_heads, self.head_dim)
         queries = queries.view(b, num_tokens, self.num_heads, self.head_dim)
 
-        ####################################################
         # NEW (KV cache)
-        # NOTE: Walk through the three cases: no cache, first cached call, later cached call.
-        # NOTE: Shape of keys after the 1st cached call (4-token prompt)? After the 2nd (1 new token)?
-        #       Which dimension grows, and why dim=1?
+        # If we're using the cache, when there's no cache, we first set the size to (1, 4, 12, 64). On the next step, keys_new is (1, 1, 12, 64) for the one new token, and the cache grows to (1, 5, 12, 64), and so on, for each subsequent token in the sequence. 
+        # If we're not using the cache, every step feeds in the whole sequence, so the second dimension of keys grows from 5, to 6, so on. It's recomputed from scratch every time instead of being stored. 
         if use_cache:
             if self.cache_k is None:
                 self.cache_k, self.cache_v = keys_new, values_new
@@ -94,7 +91,6 @@ class MultiHeadAttention(nn.Module):
             keys, values = self.cache_k, self.cache_v
         else:
             keys, values = keys_new, values_new
-        ####################################################
 
         # This transposition is necessary because @ does matrix multiplication on the last two dimensions, treating every dimension before as "do this separately for each one".
         #   After the transposition, the last two dimensions are (tokens, 64). So queries @ keys.T will produce 12 score tables that are 4 rows long and 4 columns wide--we're calculating each token's attemtion to every other token and itself.
@@ -107,21 +103,18 @@ class MultiHeadAttention(nn.Module):
         # Each head compares every query with every key. There will be one score per (token, token) pair.
         #   (1, 12, 4, 64) @ (1, 12, 64, 4) becomes (1, 12, 4, 4)
         attn_scores = queries @ keys.transpose(2, 3)
-        # NOTE (KV cache): Shape of attn_scores on a cached step with 10 tokens in the cache?
-        #       (Hint: queries and keys no longer have the same number of tokens.)
-
-        ####################################################
+        
         # NEW (KV cache)
-        # NOTE: Why does the mask now need TWO sizes (Q and K)?
-        # NOTE: What is ptr_current_pos tracking? Which mask row gets used for the 5th token?
+        #   The mask slice now needs two sizes, rows for queries and columns for keys, because there is 1 query but 5 keys. attn_scores is (1, 12, 1, 5).
+        #   Also, during decode, the mask is still applied but hides nothing, because future tokens don't exist yet. Without cache, decode 1 would build a full 5x5 table with 25 scores per head, and only the last row would be used. 
+        #   With the cache, we only compute the last row. 
         num_tokens_Q = queries.shape[-2]
         num_tokens_K = keys.shape[-2]
         if use_cache:
             mask_bool = self.mask.bool()[
-                self.ptr_current_pos:self.ptr_current_pos + num_tokens_Q, :num_tokens_K
+                self.ptr_current_pos:self.ptr_current_pos + num_tokens_Q, :num_tokens_K 
             ]
-            self.ptr_current_pos += num_tokens_Q
-        ####################################################
+            self.ptr_current_pos += num_tokens_Q                # ptr_current_pos is the position of the current query token, so it picks which mask row to use. For the 5th token, that would be row 4. During decode, that row hides nothing. 
 
         # The stored mask is 1024 rows and 1024 columns because it's built for the maximum context length. The input only has 4 tokens, so this cuts out the top-left 4 by 4 corner for us to use as a mask.
         # CHANGED (KV cache): now the else branch; slices with num_tokens_Q, num_tokens_K.
@@ -151,13 +144,11 @@ class MultiHeadAttention(nn.Module):
         # context_vec ends up being the same shape as x, so the process can be repeated. 
         return context_vec
 
-    ####################################################
     # NEW (KV cache)
-    # NOTE: When does this need to be called, and what goes wrong if you forget?
+    # This is called once at the start of each new generation, before prefill (through model.reset_kv_cache()), so that the cache clears and new values don't build on top of the previous run's values. 
     def reset_cache(self):
         self.cache_k, self.cache_v = None, None
         self.ptr_current_pos = 0
-    ####################################################
 
 
 # Chapter 4: As each token's 768 numbers pass through the 12 transformer blocks, the numbers from the transformer edits can drift widely. 
@@ -239,11 +230,9 @@ class TransformerBlock(nn.Module):
         shortcut = x                # Save the input. After the layer runs, it's added back, so the layer only learns an edit. It also gives the calculus a frictionless highway to pass learning signals all the way through a massive neural network without getting trapped or flattened out through the layers.
         x = self.norm1(x)           # After saving the shortcut, we normalize x to manage the data's spread. 
         # WAS: x = self.att(x)
-        ####################################################
         # NEW (KV cache)
-        # NOTE: Why does attention need use_cache but feed-forward (below) doesn't?
+        # The feed-forward network doesn't need to use a cache, because it's not mixing the values of any tokens together. 
         x = self.att(x, use_cache=use_cache)             # The attention layer, where each token gathers information from itself and earlier tokens. Returns context-aware vectors, same shape (1, 4, 768).
-        ####################################################
         x = self.drop_shortcut(x)   # During training we randomly zero 10% of the layer's output before adding the shortcut back.
         x = x + shortcut            # We then add the shortcut data back in. 
 
@@ -270,15 +259,13 @@ class GPTModel(nn.Module):
         # Create transformer blocks based on n_layers with their own weights. nn.Sequential means that block 1's output goes into block 2 and so on.
         # WAS: self.trf_blocks = nn.Sequential(
         #          *[TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
-        ####################################################
         # NEW (KV cache)
-        # NOTE: Why switch from nn.Sequential to nn.ModuleList? (Hint: what can't Sequential pass along?)
-        # NOTE: What does current_pos count?
+        # We switched from nn.Sequential here to nn.ModuleList, because nn.Sequential can only hand each block x. It doesn't pass extra arguments like use_cache=True. 
+        # current_pos counts how many tokens have gone through the model so far so the next token gets the right position number. 
         self.trf_blocks = nn.ModuleList(
             [TransformerBlock(cfg) for _ in range(cfg["n_layers"])])
 
         self.current_pos = 0
-        ####################################################
 
         self.final_norm = LayerNorm(cfg["emb_dim"])                                 # Create a final normalization layer of size emb_dim. One last layer norm to clean up each token's vector before scoring.
         self.out_head = nn.Linear(cfg["emb_dim"], cfg["vocab_size"], bias=False)    # 50,257 neurons, one per vocabulary token. Each reads a token's 768 numbers and outputs one score, which makes the logits.
@@ -290,51 +277,45 @@ class GPTModel(nn.Module):
         tok_embeds = self.tok_emb(in_idx)                                       # Shape: (1, 4, 768). Each of the 4 IDs is swapped for its 768-number row.
 
         # WAS: pos_embeds = self.pos_emb(torch.arange(seq_len, device=in_idx.device))  # Shape: (4, 768). torch.arange(4) = [0, 1, 2, 3], the slot numbers, so it fetches 4 position rows
-
-        ####################################################
         # NEW (KV cache)
-        # NOTE: On a cached step that feeds in only the 5th token, why can't we use arange(seq_len) anymore?
-        #       What are pos_ids on that step?
-        # NOTE: Shape of pos_embeds after unsqueeze(0)?
+        # We can't use arange(seq_len) when using a cache, because it always starts at 0. Instead, we want to start at the token we're decoding. 
+        #   The model keeps a running count of which token we're on through current_pos. 
         if use_cache:
             pos_ids = torch.arange(self.current_pos, self.current_pos + seq_len, device=in_idx.device, dtype=torch.long)
             self.current_pos += seq_len
         else:
             pos_ids = torch.arange(0, seq_len, device=in_idx.device, dtype=torch.long)
-        pos_embeds = self.pos_emb(pos_ids).unsqueeze(0)
-        ####################################################
+        pos_embeds = self.pos_emb(pos_ids).unsqueeze(0)                         # Looking up one ID returns one row of 768 numbers, shape (1, 768). unsqueeze(0) adds the batch dimension, giving (1, 1, 768). That matches tok_embeds (1, 1, 768), so the two can be added.
 
         x = tok_embeds + pos_embeds                                             # Shape: (1, 4, 768). The 4 position rows are added to every sequence in the batch using broadcasting.                                     
         x = self.drop_emb(x)                                                    # Shape: (1, 4, 768). Zeroing some values doesn't change the shape.
 
         # WAS: x = self.trf_blocks(x)                                                  # Shape: (1, 4, 768). Every block keeps the shape. That's why 12 can be chained.
-        ####################################################
         # NEW (KV cache)
-        # NOTE: What does this loop do that the one-line Sequential call couldn't?
+        # This loop passes use_cache to each block, which nn.Sequential can't do. 
         for blk in self.trf_blocks:
             x = blk(x, use_cache=use_cache)
-        ####################################################
 
         x = self.final_norm(x)                                                  # Shape: (1, 4, 768). Layer norm changes values, not shape.
         logits = self.out_head(x)                                               # Shape: (1, 4, 50257). nn.Linear changes only the last number from 768 to 50,257. One score per position.
         return logits
 
-    ####################################################
     # NEW (KV cache)
-    # NOTE: How many separate caches does this reset for GPT-2 124M?
+    # Each of the 12 transformer blocks has an attention layer that keeps its own cache_k and cache_v. A reset is necessary so that the the new prompt's keys don't get added to the old ones, 
+    #   and so that current_pos starts counting at 0 again on the next run too. The reset sets the cache_k and cache_v to None in each transformer block, sets its mask pointer to 0, and resets the current_pos to 0. 
+    #   It runs once before prefill. 
     def reset_kv_cache(self):
         for blk in self.trf_blocks:
             blk.att.reset_cache()
         self.current_pos = 0
-    ####################################################
 
 
-# This loop is somewhat wasteful, becayse each pass re-runs every earlier token through all 12 blocks, recomputing keys and values that are identical to the last pass. 
+# This loop is somewhat wasteful, because each pass re-runs every earlier token through all 12 blocks, recomputing keys and values that are identical to the last pass. 
 #   This is because the causal mask means earlier tokens can't see later ones. Only the last position's output is used. The KV cache stores those keys and values, so each pass only has to process the new token.
 #   idx is a (batch, n_tokens) array of indices.
 def generate_text_simple(model, idx, max_new_tokens, context_size):
     # CHANGED (KV cache): Raschka removed model.eval() from this function in this file.
-    # NOTE: Does that matter for this script? (Hint: look at main().)
+    # Removing model.eval() doesn't matter, because main() calls model.eval. 
     for _ in range(max_new_tokens) :                            # The loop runs max_new_tokens times, one new token per pass.
         idx_cond = idx[:, -context_size:]                       # If the sequence is longer than the context window of 1,024, keep only the last 1,024 tokens.
 
@@ -354,41 +335,35 @@ def generate_text_simple(model, idx, max_new_tokens, context_size):
 
     return idx
 
-
-####################################################
 # NEW (KV cache)
-# NOTE: Describe this function in one sentence. Compare it to generate_text_simple above.
-# NOTE: Prefill vs. decode: which line is prefill? Which line is decode?
-#       Shape of the input to model(...) on each?
+# This loop is less wasteful, because it uses a KV cache. The cache stores keys and values, and each step feeds only the new token through the model rather than the whole sequence. 
 def generate_text_simple_cached(model, idx, max_new_tokens,
                                 context_size=None, use_cache=True):
-    model.eval()
-    ctx_len = context_size or model.pos_emb.num_embeddings
+    model.eval()                                                        # Turns the dropout layer off
+    ctx_len = context_size or model.pos_emb.num_embeddings              # Use context size if one was provided, otherwise, fall back to the number of rows in the position table. 
 
+    # Again, we're running the model to generate text now, so we turn off backpropagation bookkeeping. 
     with torch.no_grad():
         if use_cache:
-            # NOTE:
+            # Prefill: This line runs the whole prompt through the model in one pass and fills the cache in all 12 layers. The input shape is (1, 4).
+            # If we're using the cache, we empty it for each new prompt and calculate the logits based only on the last tokens that fit in the context window. 
             model.reset_kv_cache()
             logits = model(idx[:, -ctx_len:], use_cache=True)
 
             for step in range(max_new_tokens):
-                # NOTE:
-                next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
-                # NOTE:
-                idx = torch.cat([idx, next_idx], dim=1)
-                # NOTE: Why skip the forward pass after the last token?
-                if step + 1 < max_new_tokens:
-                    logits = model(next_idx, use_cache=True)
+                next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)   # argmax chooses the token ID with the highest score. 
+                idx = torch.cat([idx, next_idx], dim=1)                 # Then add the next token to our sequence, which is one row of IDs, growing with each step. 
+                # We don't need a forward call for our last token, because our response is complete. A forward call would compute scores for token 201, when we only need to return 200 tokens. 
+                if step + 1 < max_new_tokens:                           
+                    logits = model(next_idx, use_cache=True)            # Decode: Only 1 new token (1,1) goes through our model now. Earlier keys and values are retrieved from the cache. 
         else:
-            # NOTE: What is this branch, and why keep it?
+            # This is the no-cache path, which allows our one function to run with and without a cache. This is to check that both processes produce identical text. 
             for _ in range(max_new_tokens):
                 logits = model(idx[:, -ctx_len:], use_cache=False)
                 next_idx = logits[:, -1].argmax(dim=-1, keepdim=True)
                 idx = torch.cat([idx, next_idx], dim=1)
 
     return idx
-####################################################
-
 
 # Start reading here. 
 def main():
@@ -426,23 +401,23 @@ def main():
     start = time.time()
 
     # Runs the model 200 times. Each pass predicts one token ID and adds it to the end. It returns the 4 prompt IDs plus 200 new ones, shape (1, 204). This call is the part being timed.
-    # WAS: token_ids = generate_text_simple(
-    #     model=model,
-    #     idx=encoded_tensor,
-    #     max_new_tokens=200,
-    #     context_size=GPT_CONFIG_124M["context_length"]
+    # WAS: 
+    # token_ids = generate_text_simple(
+    #   model=model,
+    #   idx=encoded_tensor,
+    #   max_new_tokens=200,
+    #   context_size=GPT_CONFIG_124M["context_length"]
     # )
 
-    ####################################################
-    # NEW (KV cache)
-    # NOTE: What's different about this call? Why is context_size gone?
+    # NEW: (KV cache)
+    # context_size was removed from this call because generate_text_simple_cached falls back to pos_emb.num_embeddings, which is 1,024, the same number main() used to pass in.
     token_ids = generate_text_simple_cached(
         model=model,
         idx=encoded_tensor,
         max_new_tokens=200,
     )
-    ####################################################
 
+    # This handles the timing of our llm. 
     if torch.cuda.is_available():
         torch.cuda.synchronize()
     total_time = time.time() - start
