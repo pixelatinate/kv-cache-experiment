@@ -1,8 +1,8 @@
 # What the KV cache actually buys you
 
-I spent a few days ramping up on LLMs by reading the first couple of chapters of *The Welch Labs Illustrated Guide to AI*, and then working through the first few chapters of *Build a Large Language Model (From Scratch)* by Sebastian Raschka. I had Claude copy Raschka's code into a file for me, and we annotated it line by line to test my understanding of it. You can see that work here: [`gpt_annotate.py`](https://github.com/pixelatinate/llm-interview-prep/blob/main/project/gpt_annotate.py).
+I spent a few days ramping up on LLMs by reading the first couple of chapters of *The Welch Labs Illustrated Guide to AI*, and then working through the first few chapters of *Build a Large Language Model (From Scratch)* by Sebastian Raschka. I had Claude copy Raschka's code into a file for me, and we annotated it line by line to test my understanding of it. You can see that work here: [`gpt_annotate.py`](project/gpt_annotate.py).
 
-After completing chapter 4 of Raschka's book, I read his essay, [*Understanding and Coding the KV Cache in LLMs from Scratch*](https://magazine.sebastianraschka.com/p/coding-the-kv-cache-in-llms) to understand how to speed up text generation. I then annotated his KV cache version of the code, which you can see here: [`gpt_kv_annotate.py`](https://github.com/pixelatinate/llm-interview-prep/blob/main/project/gpt_kv_annotate.py).
+After completing chapter 4 of Raschka's book, I read his essay, [*Understanding and Coding the KV Cache in LLMs from Scratch*](https://magazine.sebastianraschka.com/p/coding-the-kv-cache-in-llms) to understand how to speed up text generation. I then annotated his KV cache version of the code, which you can see here: [`gpt_kv_annotate.py`](project/gpt_kv_annotate.py).
 
 ## 1. Question
 
@@ -64,7 +64,7 @@ python ch04/03_kv-cache/gpt_ch04.py            # no cache
 python ch04/03_kv-cache/gpt_with_kv_cache.py   # with cache
 ```
 
-**Output-length experiment:** Raschka's scripts hardcode 200 new tokens. To test other lengths without editing his files, I wrote [`experiment.py`](experiment.py), which imports his two files as modules and calls his functions directly. It...
+**Output-length experiment:** Raschka's scripts hardcode 200 new tokens. To test other lengths without editing his files, I wrote [`experiment.py`](project/experiment.py), which imports his two files as modules and calls his functions directly. It...
 
 1. Builds two fresh, untrained GPT-2 124M models, one from each of Raschka's files, using his config and the same random seed (123), so both start with identical weights.
 2. Encodes the prompt "Hello, I am" (4 tokens) with the GPT-2 tokenizer.
@@ -72,9 +72,9 @@ python ch04/03_kv-cache/gpt_with_kv_cache.py   # with cache
 4. For each output length (50, 100, 200, and 400 new tokens), it runs each version 3 times, back to back: no cache, then cache.
 5. After every run, it checks that both versions produced exactly the same token IDs (`torch.equal`).
 6. Reports the median of the 3 times for each version and length, and computes tokens/sec and speedup from the medians.
-7. Saves every individual run to `results.csv` and draws the chart.
+7. Saves every individual run to `project/results.csv` and draws the chart.
 
-To reproduce, from the `llm-interview-prep` folder:
+To reproduce, from this repo's root folder:
 
 ```bash
 ~/Documents/GitHub/LLMs-from-scratch/.venv/bin/python project/experiment.py
@@ -92,7 +92,7 @@ To reproduce, from the `llm-interview-prep` folder:
 
 ## 6. Results
 
-Measured on Sunday, October 4, 2026. All raw timings are in [`results.csv`](results.csv).
+Measured on Sunday, October 4, 2026. All raw timings are in [`results.csv`](project/results.csv).
 
 ### 6.1 Baseline: 200 new tokens, compared with Raschka
 
@@ -118,7 +118,7 @@ Median of 3 runs per setting. Tokens/sec = new tokens / median time. Speedup = n
 | 200 | 32.50, 33.69, 30.91 | 32.50 | 6.2 | 5.16, 5.00, 4.95 | 5.00 | 40.0 | 6.5x |
 | 400 | 115.34, 114.92, 117.24 | 115.34 | 3.5 | 10.56, 11.16, 12.39 | 11.16 | 35.8 | 10.3x |
 
-![Tokens/sec vs. output length, with and without the KV cache](kv_cache_speed.png)
+![Tokens/sec vs. output length, with and without the KV cache](project/kv_cache_speed.png)
 
 ### 6.3 Correctness
 

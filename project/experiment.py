@@ -5,13 +5,13 @@
 #   gpt_with_kv_cache.py   -> generate_text_simple_cached  (with cache)
 # and checks that both produce identical tokens.
 #
-# Run from the llm-interview-prep folder, using the book repo's venv:
+# Run from the repo root folder, using the book repo's venv:
 #   ~/Documents/GitHub/LLMs-from-scratch/.venv/bin/python project/experiment.py
 #
 # Outputs (in project/):
 #   results.csv           every individual run
 #   kv_cache_speed.png    the chart
-#   a markdown table printed to the terminal, to paste into results.md
+#   a markdown table printed to the terminal, to paste into README.md
 
 import csv
 import statistics
@@ -111,7 +111,7 @@ def generate_with_cache(model, idx, max_new_tokens):
 
 def tokens_per_sec(num_tokens, seconds):
     # TODO: Decide which token count to divide by and write it in
-    #       results.md (Method > "How tokens/sec is calculated"):
+    #       README.md (Method > "How tokens/sec is calculated"):
     #         - new tokens only (max_new_tokens), or
     #         - the whole output (prompt + new), like Raschka's script.
     #       main() below passes in whichever you choose.
@@ -195,7 +195,7 @@ def save_csv(rows):
 
 
 def print_markdown_table(summary):
-    """Print rows in the same column order as results.md section 6.2."""
+    """Print rows in the same column order as README.md section 6.2."""
     fmt = lambda ts: ", ".join(f"{t:.2f}" for t in ts)
     print("\n| New tokens | No cache: runs (s) | No cache: median (s) | No cache (tok/s) "
           "| Cache: runs (s) | Cache: median (s) | Cache (tok/s) | Speedup |")
